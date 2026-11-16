@@ -1,0 +1,18 @@
+[package]
+name = "tls-exit"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The HTTP/TLS stack of tabularberg (icechunk 2.3.1, "minimal" tier), pinned
+# to the versions in its Cargo.lock (copied here as the starting lock file):
+# object_store 0.14.2 (http), reqwest 0.13.5 (rustls, http2, stream),
+# rustls 0.23.46 + aws-lc-rs 1.19 (prebuilt-nasm), rustls-platform-verifier
+# 0.7.1, tokio 1.54.1 multi-thread.
+[dependencies]
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "http2", "stream"] }
+object_store = { version = "=0.14.2", default-features = false, features = ["http", "fs", "aws-lc-rs"] }
+
+[profile.release]
+debug = 1

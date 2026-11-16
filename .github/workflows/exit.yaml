@@ -1,0 +1,153 @@
+# Which layer crashes at process exit on Windows after a network read?
+# Each job runs one case per process through scripts/run-case.ps1, which
+# records the exit code, the Application Error event (faulting module,
+# exception code) and a WER minidump, and writes a table to the job summary.
+name: exit
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: pwsh
+
+env:
+  RUST_BACKTRACE: "1"
+
+jobs:
+  r-tabularberg:
+    name: R + tabularberg (r-universe binary, GNU toolchain)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: release
+      - name: WER local dumps
+        run: ./scripts/wer-dumps.ps1
+      - name: Install tabularberg (binary)
+        run: |
+          Rscript -e 'install.packages("tabularberg", repos = c("https://hypertidy.r-universe.dev", "https://cloud.r-project.org"))'
+          Rscript -e 'd <- packageDescription("tabularberg"); cat("tabularberg", d$Version, "sha", d$RemoteSha, "| built", d$Built, "\n")'
+      - name: Cases
+        run: |
+          "| case | result | exit | hex | faulting module, code, offset |" | Out-File -Encoding utf8 results.md
+          "|---|---|---|---|---|" | Out-File -Append -Encoding utf8 results.md
+          foreach ($c in 'load', 'local', 'https-open', 'https', 'https-drop-all', 's3') {
+            ./scripts/run-case.ps1 "R $c" Rscript r/cases.R $c
+          }
+      - name: Analyse dumps
+        if: always()
+        run: ./scripts/analyse-dumps.ps1
+      - name: Summary
+        if: always()
+        run: Get-Content results.md | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dumps-r
+          path: dumps/
+          if-no-files-found: ignore
+
+  python-icechunk:
+    name: Python + icechunk (wheel, MSVC toolchain)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: WER local dumps
+        run: ./scripts/wer-dumps.ps1
+      - name: Install icechunk
+        run: |
+          python -m pip install --quiet "icechunk>=2.1,<3" "zarr>=3"
+          python -c "import icechunk, zarr; print('icechunk', icechunk.__version__, 'zarr', zarr.__version__)"
+      - name: Cases
+        run: |
+          "| case | result | exit | hex | faulting module, code, offset |" | Out-File -Encoding utf8 results.md
+          "|---|---|---|---|---|" | Out-File -Append -Encoding utf8 results.md
+          foreach ($c in 'open', 'https', 's3') {
+            ./scripts/run-case.ps1 "python $c" python python/read_oisst.py $c
+          }
+      - name: Analyse dumps
+        if: always()
+        run: ./scripts/analyse-dumps.ps1
+      - name: Summary
+        if: always()
+        run: Get-Content results.md | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dumps-python
+          path: dumps/
+          if-no-files-found: ignore
+
+  rust:
+    name: Rust exe, ${{ matrix.target }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-gnu, x86_64-pc-windows-msvc]
+    steps:
+      - uses: actions/checkout@v4
+      # Rtools: the toolchain R packages are built with (GNU target only)
+      - uses: r-lib/actions/setup-r@v2
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        with:
+          r-version: release
+      - name: GNU toolchain from Rtools (as R's Makevars.win does)
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        run: |
+          $rt = if ($env:RTOOLS45_HOME) { $env:RTOOLS45_HOME } else { 'C:\rtools45' }
+          $tc = Join-Path $rt 'x86_64-w64-mingw32.static.posix\bin'
+          Get-ChildItem $tc -Filter '*gcc*.exe' | Select-Object -First 5 | ForEach-Object { $_.Name }
+          # rextendr's trick: rustc asks for -lgcc_eh, which Rtools lacks
+          $mock = Join-Path $env:RUNNER_TEMP 'libgcc_mock'
+          New-Item -ItemType Directory -Force $mock | Out-Null
+          New-Item -ItemType File -Force (Join-Path $mock 'libgcc_eh.a') | Out-Null
+          "$tc" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          (Join-Path $rt 'usr\bin') | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=$(Join-Path $tc 'gcc.exe')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "CC_x86_64_pc_windows_gnu=$(Join-Path $tc 'gcc.exe')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "AR_x86_64_pc_windows_gnu=$(Join-Path $tc 'ar.exe')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LIBRARY_PATH=$mock" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - name: Build
+        working-directory: rust
+        run: |
+          rustup target add ${{ matrix.target }}
+          rustc --version
+          cargo build --release --locked --target ${{ matrix.target }}
+      - name: WER local dumps
+        run: ./scripts/wer-dumps.ps1
+      - name: Cases
+        run: |
+          "| case | result | exit | hex | faulting module, code, offset |" | Out-File -Encoding utf8 results.md
+          "|---|---|---|---|---|" | Out-File -Append -Encoding utf8 results.md
+          # plain http: a local server, so http vs https separates TLS from the rest
+          $srv = Start-Process python -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1' -WorkingDirectory data -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 3
+          $env:HTTP_URL = 'http://127.0.0.1:8765/oisst-sample/probe.json'
+          $exe = "rust/target/${{ matrix.target }}/release/tls-exit.exe"
+          foreach ($m in 'none', 'http', 'https', 'https-shutdown', 'object-store') {
+            ./scripts/run-case.ps1 "rust ${{ matrix.target }} $m" $exe $m
+          }
+          Stop-Process -Id $srv.Id -ErrorAction SilentlyContinue
+      - name: Analyse dumps
+        if: always()
+        run: ./scripts/analyse-dumps.ps1
+      - name: Summary
+        if: always()
+        run: Get-Content results.md | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dumps-rust-${{ matrix.target }}
+          path: |
+            dumps/
+            rust/target/${{ matrix.target }}/release/tls-exit.exe
+            rust/target/${{ matrix.target }}/release/tls-exit.pdb
+          if-no-files-found: ignore
