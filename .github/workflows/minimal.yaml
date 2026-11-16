@@ -4,6 +4,8 @@
 #              base    as rustls builds it
 #              shared  -DBORINGSSL_SHARED_LIBRARY (aws-lc's zeros option)
 #              win7    -D_WIN32_WINNT=0x0601 (BCryptGenRandom, not ProcessPrng)
+#              win10   -D_WIN32_WINNT=0x0A00 (ProcessPrng; MinGW's default is the
+#                      BCryptGenRandom path, run 4)
 #  r-source: tabularberg built from source with the same builds, plus
 #              zeroize  base aws-lc, and tabularberg runs aws-lc's exit
 #                       zeroization from R's exit finalizer
@@ -31,7 +33,7 @@ jobs:
       fail-fast: false
       matrix:
         target: [x86_64-pc-windows-gnu, x86_64-pc-windows-msvc]
-        variant: [base, shared, win7]
+        variant: [base, shared, win7, win10]
         include:
           - variant: base
             cflags: ""
@@ -39,6 +41,8 @@ jobs:
             cflags: "-DBORINGSSL_SHARED_LIBRARY"
           - variant: win7
             cflags: "-D_WIN32_WINNT=0x0601"
+          - variant: win10
+            cflags: "-D_WIN32_WINNT=0x0A00"
     steps:
       - uses: actions/checkout@v4
       # Rtools: the GNU toolchain R packages are built with, and its objdump
@@ -59,6 +63,13 @@ jobs:
           "CC_x86_64_pc_windows_gnu=$(Join-Path $tc 'gcc.exe')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           "AR_x86_64_pc_windows_gnu=$(Join-Path $tc 'ar.exe')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           "LIBRARY_PATH=$mock" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      # aws-lc's CRYPTO_sysrand (rand_extra/windows.c) takes the BCryptGenRandom
+      # path when _WIN32_WINNT <= _WIN32_WINNT_WIN7, else ProcessPrng
+      - name: Rtools' default _WIN32_WINNT
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        run: |
+          '#include <windows.h>' | gcc -dM -E -x c - | Select-String -Pattern '#define (_WIN32_WINNT|_WIN32_WINNT_WIN7|_WIN32_WINNT_WIN10|WINVER|NTDDI_VERSION) '
+          gcc --version | Select-Object -First 1
       - name: Build
         working-directory: minimal
         run: |
@@ -102,7 +113,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [base, shared, win7, zeroize]
+        variant: [base, shared, win7, win10, zeroize]
         include:
           - variant: base
             cflags: ""
@@ -110,6 +121,8 @@ jobs:
             cflags: "-DBORINGSSL_SHARED_LIBRARY"
           - variant: win7
             cflags: "-D_WIN32_WINNT=0x0601"
+          - variant: win10
+            cflags: "-D_WIN32_WINNT=0x0A00"
           - variant: zeroize
             cflags: ""
     steps:

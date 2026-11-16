@@ -24,4 +24,5 @@ aws-lc build variants, through `AWS_LC_SYS_CFLAGS` (CI: `../.github/workflows/mi
 |---|---|---|
 | base | none | as rustls builds it |
 | shared | `-DBORINGSSL_SHARED_LIBRARY` | the zeroization uses zeros, as aws-lc's own DLL build does (also makes the aws-lc API `dllexport`) |
-| win7 | `-D_WIN32_WINNT=0x0601` | `CRYPTO_sysrand` uses `BCryptGenRandom` (bcrypt.dll, a static import) instead of `ProcessPrng` (bcryptprimitives.dll, loaded on demand) |
+| win7 | `-D_WIN32_WINNT=0x0601` | `CRYPTO_sysrand` uses `BCryptGenRandom` instead of `ProcessPrng` (no change on MinGW, which already takes this path: run 4) |
+| win10 | `-D_WIN32_WINNT=0x0A00` | `CRYPTO_sysrand` uses `ProcessPrng`, as MSVC builds do |
