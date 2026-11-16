@@ -1,0 +1,9 @@
+# Minimal repro, no R: aws-lc (via aws-lc-rs, as rustls uses it) statically
+# linked into a DLL, loaded by an exe that then exits with the DLL loaded,
+# as R does with package DLLs. See minimal/README.md.
+[workspace]
+members = ["awslc-dll", "loader"]
+resolver = "2"
+
+[profile.release]
+debug = 1

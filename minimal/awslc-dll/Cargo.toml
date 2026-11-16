@@ -1,0 +1,13 @@
+[package]
+name = "awslc-dll"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+# aws-lc-rs 1.19.0 / aws-lc-sys 0.47.0, as in tabularberg's Cargo.lock;
+# prebuilt-nasm as rustls' default build uses on Windows.
+[dependencies]
+aws-lc-rs = { version = "=1.19.0", default-features = false, features = ["aws-lc-sys", "prebuilt-nasm"] }

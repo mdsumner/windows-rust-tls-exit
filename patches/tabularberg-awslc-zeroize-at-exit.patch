@@ -1,0 +1,64 @@
+diff --git a/R/extendr-wrappers.R b/R/extendr-wrappers.R
+index 80a8332..8a602d8 100644
+--- a/R/extendr-wrappers.R
++++ b/R/extendr-wrappers.R
+@@ -14,6 +14,9 @@ ic_compiled_features_ <- function() .Call(wrap__ic_compiled_features_)
+ #' @noRd
+ ic_runtime_shutdown_ <- function() .Call(wrap__ic_runtime_shutdown_)
+ 
++#' @noRd
++ic_awslc_exit_ <- function() .Call(wrap__ic_awslc_exit_)
++
+ #' @noRd
+ ic_storage_local_ <- function(path) .Call(wrap__ic_storage_local_, path)
+ 
+diff --git a/R/zzz.R b/R/zzz.R
+index ef5570d..97bf328 100644
+--- a/R/zzz.R
++++ b/R/zzz.R
+@@ -7,7 +7,10 @@
+ .runtime_guard <- new.env(parent = emptyenv())
+ 
+ .onLoad <- function(libname, pkgname) {
+-  reg.finalizer(.runtime_guard, function(e) try(ic_runtime_shutdown_(), silent = TRUE), onexit = TRUE)
++  reg.finalizer(.runtime_guard, function(e) {
++    try(ic_runtime_shutdown_(), silent = TRUE)
++    try(ic_awslc_exit_(), silent = TRUE)
++  }, onexit = TRUE)
+   s3_register("dbplyr::dbplyr_edition", "IcechunkConnection", function(con) 2L)
+   s3_register("dbplyr::sql_dialect", "IcechunkConnection", function(con) {
+     state <- .dbi_check(con)
+diff --git a/src/rust/src/lib.rs b/src/rust/src/lib.rs
+index b412672..413c732 100644
+--- a/src/rust/src/lib.rs
++++ b/src/rust/src/lib.rs
+@@ -32,6 +32,23 @@ fn ic_runtime_shutdown_() -> bool {
+     runtime::shutdown()
+ }
+ 
++/// Windows exit crash (windows-rust-tls-exit): run aws-lc's exit-time DRBG
++/// zeroization now, from R's exit finalizer, while ProcessPrng still works,
++/// so its own run on DLL_PROCESS_DETACH (inside ExitProcess) is a no-op.
++/// RAND blocks afterwards: call it only on the way out. TRUE if it ran.
++/// @noRd
++#[extendr]
++fn ic_awslc_exit_() -> bool {
++    #[cfg(windows)]
++    unsafe {
++        unsafe extern "C" {
++            fn aws_lc_0_47_0_rand_thread_local_state_clear_all_FOR_TESTING();
++        }
++        aws_lc_0_47_0_rand_thread_local_state_clear_all_FOR_TESTING();
++    }
++    cfg!(windows)
++}
++
+ extendr_module! {
+     mod tabularberg;
+     use storage;
+@@ -40,4 +57,5 @@ extendr_module! {
+     fn ic_icechunk_version_;
+     fn ic_compiled_features_;
+     fn ic_runtime_shutdown_;
++    fn ic_awslc_exit_;
+ }

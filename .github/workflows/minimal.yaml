@@ -1,0 +1,167 @@
+# Run 4: the aws-lc exit abort without R, and candidate workarounds.
+#  dll:      a DLL with only aws-lc in it (minimal/), loaded by a small exe,
+#            GNU (Rtools) and MSVC, for three builds of aws-lc's C:
+#              base    as rustls builds it
+#              shared  -DBORINGSSL_SHARED_LIBRARY (aws-lc's zeros option)
+#              win7    -D_WIN32_WINNT=0x0601 (BCryptGenRandom, not ProcessPrng)
+#  r-source: tabularberg built from source with the same builds, plus
+#              zeroize  base aws-lc, and tabularberg runs aws-lc's exit
+#                       zeroization from R's exit finalizer
+#                       (patches/tabularberg-awslc-zeroize-at-exit.patch)
+name: minimal
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: pwsh
+
+env:
+  RUST_BACKTRACE: "1"
+  TABULARBERG_REF: 114720012c4b345aea48a75fd8258cbf82b22bcb
+
+jobs:
+  dll:
+    name: DLL, ${{ matrix.target }}, ${{ matrix.variant }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-gnu, x86_64-pc-windows-msvc]
+        variant: [base, shared, win7]
+        include:
+          - variant: base
+            cflags: ""
+          - variant: shared
+            cflags: "-DBORINGSSL_SHARED_LIBRARY"
+          - variant: win7
+            cflags: "-D_WIN32_WINNT=0x0601"
+    steps:
+      - uses: actions/checkout@v4
+      # Rtools: the GNU toolchain R packages are built with, and its objdump
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: release
+      - name: GNU toolchain from Rtools (as R's Makevars.win does)
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        run: |
+          $rt = if ($env:RTOOLS45_HOME) { $env:RTOOLS45_HOME } else { 'C:\rtools45' }
+          $tc = Join-Path $rt 'x86_64-w64-mingw32.static.posix\bin'
+          $mock = Join-Path $env:RUNNER_TEMP 'libgcc_mock'
+          New-Item -ItemType Directory -Force $mock | Out-Null
+          New-Item -ItemType File -Force (Join-Path $mock 'libgcc_eh.a') | Out-Null
+          "$tc" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          (Join-Path $rt 'usr\bin') | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=$(Join-Path $tc 'gcc.exe')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "CC_x86_64_pc_windows_gnu=$(Join-Path $tc 'gcc.exe')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "AR_x86_64_pc_windows_gnu=$(Join-Path $tc 'ar.exe')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LIBRARY_PATH=$mock" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - name: Build
+        working-directory: minimal
+        run: |
+          if ('${{ matrix.cflags }}') { $env:AWS_LC_SYS_CFLAGS = '${{ matrix.cflags }}' }
+          "AWS_LC_SYS_CFLAGS='$env:AWS_LC_SYS_CFLAGS'"
+          rustup target add ${{ matrix.target }}
+          rustc --version
+          cargo build --release --locked --target ${{ matrix.target }}
+      - name: DLL imports and exports
+        run: ./scripts/pe-info.ps1 "awslc_dll ${{ matrix.target }} ${{ matrix.variant }}" "minimal/target/${{ matrix.target }}/release/awslc_dll.dll"
+      - name: WER local dumps
+        run: ./scripts/wer-dumps.ps1
+      - name: Cases
+        run: |
+          "| case | result | exit | hex | faulting module, code, offset |" | Out-File -Encoding utf8 results.md
+          "|---|---|---|---|---|" | Out-File -Append -Encoding utf8 results.md
+          $exe = "minimal/target/${{ matrix.target }}/release/loader.exe"
+          foreach ($m in 'load', 'rand', 'rand-thread', 'rand-thread-alive', 'rand-free', 'preload-rand', 'rand-zeroize-now') {
+            ./scripts/run-case.ps1 "${{ matrix.target }} ${{ matrix.variant }} $m" $exe $m
+          }
+      - name: Under cdb
+        if: always()
+        run: ./scripts/debug-exe.ps1 "rand ${{ matrix.target }} ${{ matrix.variant }}" "minimal/target/${{ matrix.target }}/release/loader.exe" rand
+      - name: Summary
+        if: always()
+        run: Get-Content results.md | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dll-${{ matrix.target }}-${{ matrix.variant }}
+          path: |
+            results.md
+            minimal/target/${{ matrix.target }}/release/loader.exe
+            minimal/target/${{ matrix.target }}/release/awslc_dll.dll
+            minimal/target/${{ matrix.target }}/release/*.pdb
+          if-no-files-found: ignore
+
+  r-source:
+    name: R + tabularberg from source, ${{ matrix.variant }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [base, shared, win7, zeroize]
+        include:
+          - variant: base
+            cflags: ""
+          - variant: shared
+            cflags: "-DBORINGSSL_SHARED_LIBRARY"
+          - variant: win7
+            cflags: "-D_WIN32_WINNT=0x0601"
+          - variant: zeroize
+            cflags: ""
+    steps:
+      # LF checkouts, so the patch applies to the tabularberg sources
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: hypertidy/tabularberg
+          ref: ${{ env.TABULARBERG_REF }}
+          path: tabularberg-src
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: release
+      - name: Dependencies
+        run: Rscript -e 'install.packages(c("DBI", "jsonlite"), repos = "https://cloud.r-project.org")'
+      - name: Patch (zeroize at exit)
+        if: matrix.variant == 'zeroize'
+        run: |
+          git -C tabularberg-src apply --verbose ../patches/tabularberg-awslc-zeroize-at-exit.patch
+          git -C tabularberg-src diff --stat
+      - name: Install from source
+        run: |
+          if ('${{ matrix.cflags }}') { $env:AWS_LC_SYS_CFLAGS = '${{ matrix.cflags }}' }
+          "AWS_LC_SYS_CFLAGS='$env:AWS_LC_SYS_CFLAGS'"
+          # R.exe: in PowerShell, R is an alias for Invoke-History
+          R.exe CMD INSTALL --no-test-load tabularberg-src
+      - name: DLL imports and exports
+        run: |
+          $dll = (& Rscript -e "cat(system.file('libs', 'x64', 'tabularberg.dll', package = 'tabularberg'))")
+          ./scripts/pe-info.ps1 "tabularberg ${{ matrix.variant }}" $dll
+      - name: WER local dumps
+        run: ./scripts/wer-dumps.ps1
+      - name: Cases
+        run: |
+          "| case | result | exit | hex | faulting module, code, offset |" | Out-File -Encoding utf8 results.md
+          "|---|---|---|---|---|" | Out-File -Append -Encoding utf8 results.md
+          foreach ($c in 'load', 'local', 'https', 's3') {
+            ./scripts/run-case.ps1 "R source ${{ matrix.variant }} $c" Rscript r/cases.R $c
+          }
+      - name: Under cdb
+        if: always()
+        run: ./scripts/debug-case.ps1 "R source ${{ matrix.variant }} https" r/cases.R https
+      - name: Summary
+        if: always()
+        run: Get-Content results.md | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r-source-${{ matrix.variant }}
+          path: results.md
+          if-no-files-found: ignore

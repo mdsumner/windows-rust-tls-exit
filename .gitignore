@@ -2,3 +2,4 @@ rust/target/
 results.md
 dumps/
 __pycache__/
+minimal/target/

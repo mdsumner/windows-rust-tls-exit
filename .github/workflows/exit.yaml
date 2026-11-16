@@ -4,9 +4,8 @@
 # exception code) and a WER minidump, and writes a table to the job summary.
 name: exit
 
+# Runs 1-3; manual now (run 4 is minimal.yaml).
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 defaults:

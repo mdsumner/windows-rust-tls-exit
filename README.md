@@ -109,9 +109,13 @@ results table to its summary.
 | Python + icechunk | the same repository and chunk through the icechunk wheel (MSVC) | icechunk/object_store upstream vs our build |
 | Rust exe, GNU and MSVC | one read with the same pinned crates, no R, no icechunk: `none`, `http` (local server, no TLS), `https`, `https-shutdown`, `object-store`; the GNU build is linked with Rtools' gcc, as R's Makevars.win does | toolchain; TLS vs plain HTTP; reqwest vs object_store |
 
-Next steps, depending on the first: a minimal extendr package with only the
-HTTPS GET (R + GNU + TLS, no icechunk); then swaps of aws-lc for ring, and of
-the platform verifier for bundled roots.
+Run 4 (`.github/workflows/minimal.yaml`, [`minimal/`](minimal/)): the abort
+without R (a DLL containing only aws-lc, loaded by a small exe; GNU and MSVC),
+and candidate workarounds, each also tried in tabularberg built from source:
+aws-lc's C built with `-DBORINGSSL_SHARED_LIBRARY` (zeros) or
+`-D_WIN32_WINNT=0x0601` (`BCryptGenRandom`), and tabularberg running aws-lc's
+exit zeroization itself from R's exit finalizer
+(`patches/tabularberg-awslc-zeroize-at-exit.patch`).
 
 ## Data
 
