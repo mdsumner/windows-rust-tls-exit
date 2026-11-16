@@ -26,72 +26,122 @@ One difference stands out: R packages on Windows are built with the GNU
 toolchain (Rtools, `x86_64-pc-windows-gnu`), while icechunk's Python wheels
 are built with MSVC.
 
-## Finding (runs 2 and 3, 2026-11-16)
+## Finding (runs 2-5, 2026-11-16)
 
-**It is aws-lc's exit-time zeroization, run from `DLL_PROCESS_DETACH`.**
-Not icechunk, tabularberg or extendr: rustycogs (same Rust TLS stack, no
-icechunk) crashes the same way.
+**aws-lc's exit-time DRBG zeroization calls `BCryptGenRandom` from
+`DLL_PROCESS_DETACH`, inside `ExitProcess`. There it fails, and aws-lc
+calls `abort()`.** This needs aws-lc to be:
+
+- **statically linked into a DLL**, so its exit destructor sits in the DLL's
+  own atexit table, which the CRT runs on `DLL_PROCESS_DETACH`. That is
+  every R package using rustls with its default aws-lc-rs provider.
+- **built for the Windows 7 API level**. Rtools' gcc (14.3.0) defaults to
+  `_WIN32_WINNT=0x0601`. At that level `CRYPTO_sysrand`
+  (`rand_extra/windows.c`) uses `BCryptGenRandom`; from Windows 8 on it uses
+  `ProcessPrng`, which works at that point.
+
+It is not icechunk, tabularberg or extendr: rustycogs crashes the same way.
+MSVC builds (the icechunk Python wheel) are fine, because they get
+`ProcessPrng`.
+
+**Fix for R packages:** build aws-lc's C at the Windows 10 level. In
+`Makevars.win`, before `cargo build`:
+`export AWS_LC_SYS_CFLAGS="-D_WIN32_WINNT=0x0A00"`. Rust's own Windows
+targets require Windows 10 anyway. tabularberg does this from `b3497ff`.
+
+### Minimal repro, no R (runs 4-5, [`minimal/`](minimal/))
+
+`awslc_dll.dll` contains only aws-lc (aws-lc-rs 1.19.0 / aws-lc-sys 0.47.0).
+`loader.exe` loads it with `LoadLibraryW`, calls `RAND_bytes`, and returns
+from `main` with the DLL still loaded, as R does. Exit codes for `rand`:
+
+| aws-lc C build (`AWS_LC_SYS_CFLAGS`) | `CRYPTO_sysrand` uses | GNU (Rtools) | MSVC |
+|---|---|---|---|
+| base | GNU: `BCryptGenRandom`, MSVC: `ProcessPrng` | `0xC0000409` | 0 |
+| `-D_WIN32_WINNT=0x0601` | `BCryptGenRandom` | `0xC0000409` | `0xC0000409` |
+| `-D_WIN32_WINNT=0x0A00` | `ProcessPrng` | 0 | 0 |
+| `-DBORINGSSL_SHARED_LIBRARY` | zeros at exit (aws-lc's own DLL build) | 0 | 0 |
+
+The `BCryptGenRandom` builds (GNU base, both win7) behave the same across the modes:
+
+| mode | exit |
+|---|---|
+| `load` (no RAND) | 0 |
+| `rand` on the main thread | `0xC0000409` |
+| `rand-thread`: on a thread joined before exit, so its state is freed | 0 |
+| `rand-thread-alive`: on a thread killed by `ExitProcess`, like tokio's workers | `0xC0000409` |
+| `rand-free`: `FreeLibrary` before exit, so detach runs outside `ExitProcess` | 0 |
+| `preload-rand`: bcryptprimitives.dll loaded first (it was already) | `0xC0000409` |
+| `rand-zeroize-now`: aws-lc's zeroization called before exit | 0 |
+
+These builds were checked from the binaries, not assumed. The GNU base DLL
+imports `bcrypt!BCryptGenRandom` and lacks the `L"bcryptprimitives"` string
+that the `ProcessPrng` path loads. The same holds for the r-universe
+tabularberg.dll. With `0x0A00` the import goes away.
+
+Stack, MSVC build with `-D_WIN32_WINNT=0x0601` (PDB, so aws-lc's frames
+are named):
+
+```
+ucrtbase!abort
+awslc_dll!aws_lc_0_47_0_CRYPTO_sysrand+0x69            rand_extra/windows.c @ 48: BCryptGenRandom failed
+awslc_dll!aws_lc_0_47_0_CRYPTO_sysrand_if_available    (inline)
+awslc_dll!tree_jitter_zeroize_drbg+0x2d                fipsmodule/rand/entropy/tree_drbg_jitter_entropy.c
+awslc_dll!rand_thread_local_state_clear_all+0x7e       fipsmodule/rand/rand.c @ 124
+ucrtbase!execute_onexit_table                          the DLL's own atexit list
+awslc_dll!dllmain_crt_process_detach                   dll_dllmain.cpp @ 182
+ntdll!LdrShutdownProcess
+ntdll!RtlExitUserProcess / KERNEL32!ExitProcessImplementation
+ucrtbase!common_exit
+loader!__scrt_common_main_seh
+```
+
+The GNU builds (cdb has no symbols for them) and R + tabularberg (run 3)
+show the same shape, with `pthread_once` in between: MinGW gcc builds aws-lc
+with pthreads. Run 3 named the last frame `ProcessPrng`, read against the
+source's default branch. The binaries show it is `BCryptGenRandom`.
+
+### R + tabularberg built from source (runs 4-5)
+
+| aws-lc build | `load`, `local` | `https`, `s3` |
+|---|---|---|
+| base | 0 | `0xC0000409` |
+| `-D_WIN32_WINNT=0x0601` | 0 | `0xC0000409` |
+| `-D_WIN32_WINNT=0x0A00` | 0 | 0 |
+| `-DBORINGSSL_SHARED_LIBRARY` (the DLL then exports ~2,900 aws-lc symbols) | 0 | 0 |
+| base, plus aws-lc's zeroization called from R's exit finalizer ([patch](patches/tabularberg-awslc-zeroize-at-exit.patch); a test-only, version-prefixed symbol) | 0 | 0 |
+
+### Earlier runs (2-3)
 
 | case | exit |
 |---|---|
-| R + tabularberg: `load`, `local`, `https-open` (no chunk fetched) | 0 |
+| R + tabularberg (r-universe binary): `load`, `local`, `https-open` (no chunk fetched) | 0 |
 | R + tabularberg: `https`, `s3`, `https-drop-all` (all objects dropped, runtime shut down) | `0xC0000409` |
 | R + rustycogs: `load` / `https` | 0 / `0xC0000409` |
 | Python + icechunk wheel (MSVC): `open`, `https`, `s3` | 0 |
 | Rust exe, same crates, GNU (Rtools) and MSVC: all modes | 0 |
 
-Under cdb (`Rterm.exe`, run 3), the fail-fast is `FAST_FAIL_FATAL_APP_EXIT`
-from `ucrtbase!abort`, with this stack (tabularberg; rustycogs is identical
-with aws-lc 0.44). Frames named from the disassembly of the r-universe
-binary (stripped; `.pdata` function bounds, import table, the string
-`" once %p is %d\n"`) against aws-lc-sys 0.47.0's source:
+A plain exe survives because its destructor runs from the exe's `atexit`
+inside `exit()`, before `ExitProcess`.
 
-```
-R_CleanUp -> exit() -> ExitProcess -> ntdll!LdrShutdownProcess
-  -> tabularberg.dll DllMain (DLL_PROCESS_DETACH, MinGW CRT)
-    -> ucrtbase!execute_onexit_table         the DLL's own atexit list
-      -> rand_thread_local_state_clear_all   __attribute__((destructor)), rand.c
-        -> tree_jitter_zeroize_thread_drbg   (via entropy_source->methods->zeroize_thread)
-          -> CRYPTO_once -> pthread_once (winpthreads)
-            -> tree_jitter_zeroize_global_drbg
-              -> tree_jitter_zeroize_drbg    tree_drbg_jitter_entropy.c
-                -> CRYPTO_sysrand_if_available -> CRYPTO_sysrand (rand_extra/windows.c)
-                  -> ProcessPrng fails -> abort()
-```
+### Upstream
 
-aws-lc documents this exact hazard, and handles it for shared builds only
+aws-lc already handles this hazard, but only for its own DLL build
 (`tree_drbg_jitter_entropy.c`, above `tree_jitter_zeroize_drbg`):
 
 > Windows shared builds take the zeros option: there this runs from a
 > libcrypto global destructor on `DLL_PROCESS_DETACH`, after `ExitProcess`,
-> where `CRYPTO_sysrand` faults on bcryptprimitives.dll (loaded on demand,
-> so not kept alive by libcrypto's dependency graph). Static builds run it
-> from the executable's `atexit` and are unaffected.
+> [...] Static builds run it from the executable's `atexit` and are
+> unaffected.
 
-```c
-#if defined(OPENSSL_WINDOWS) && defined(BORINGSSL_SHARED_LIBRARY)
-  OPENSSL_memset(random_data, 0, CTR_DRBG_ENTROPY_LEN);
-#else
-  CRYPTO_sysrand_if_available(random_data, CTR_DRBG_ENTROPY_LEN);
-#endif
-```
+That doesn't hold for a static aws-lc linked into a DLL. Two possible fixes:
 
-The gap: a **static** aws-lc linked **into a DLL** (an R package, any Rust
-cdylib) is not `BORINGSSL_SHARED_LIBRARY`, so it takes the sysrand path, but
-its destructors run on `DLL_PROCESS_DETACH` like a shared build's. That is
-every R package using rustls with its default aws-lc-rs provider on Windows.
-It needs random state to exist (a TLS handshake), hence network-only.
-
-The plain exe survives because its destructor runs from the exe's `atexit`
-inside `exit()`, before `ExitProcess`. Why the Python wheel (MSVC, also a
-DLL) survives is not established; its aws-lc may predate the tree-jitter
-DRBG.
-
-Candidate fixes: upstream, take the zeros option on Windows whenever the
-destructor may run during process shutdown (all Windows builds, or when
-`RtlDllShutdownInProgress()`), or not abort there; downstream, define
-`BORINGSSL_SHARED_LIBRARY` for aws-lc's C build (untested, affects exports),
-or carry that one-line patch.
+- **aws-lc:** take the zeros option on Windows wherever this can run on
+  `DLL_PROCESS_DETACH` (any Windows build), or don't `abort()` in
+  `CRYPTO_sysrand_if_available`.
+- **aws-lc-sys:** its cc builder sets `_WIN32_WINNT=0x0601` for `-win7-`
+  triples. It could set `0x0A00` for the other Windows triples, so MinGW
+  builds stop inheriting the toolchain's Windows 7 default.
 
 ## The experiments
 
