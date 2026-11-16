@@ -4,7 +4,9 @@
 # exit finalizer; that did not stop the crash.
 case <- commandArgs(TRUE)[1]
 suppressPackageStartupMessages(library(tabularberg))
-cat("tabularberg", format(packageVersion("tabularberg")), "| features:", ic_compiled_features(), "\n")
+d <- utils::packageDescription("tabularberg")
+cat("tabularberg", d$Version, "sha", d$RemoteSha, "built", d$Built, "\n")
+cat("features:", ic_compiled_features(), "\n")
 
 read_oisst <- function(cell) {
   ox <- ic_example_oisst(cell)

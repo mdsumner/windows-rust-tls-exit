@@ -30,7 +30,6 @@ jobs:
       - name: Install tabularberg (binary)
         run: |
           Rscript -e 'install.packages("tabularberg", repos = c("https://hypertidy.r-universe.dev", "https://cloud.r-project.org"))'
-          Rscript -e 'd <- packageDescription("tabularberg"); cat("tabularberg", d$Version, "sha", d$RemoteSha, "| built", d$Built, "\n")'
       - name: Cases
         run: |
           "| case | result | exit | hex | faulting module, code, offset |" | Out-File -Encoding utf8 results.md
