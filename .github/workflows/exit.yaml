@@ -37,6 +37,21 @@ jobs:
           foreach ($c in 'load', 'local', 'https-open', 'https', 'https-drop-all', 's3') {
             ./scripts/run-case.ps1 "R $c" Rscript r/cases.R $c
           }
+      # control: same Rust HTTP/TLS stack in another R package, no icechunk
+      - name: Install rustycogs (binary)
+        run: Rscript -e 'install.packages("rustycogs", repos = c("https://hypertidy.r-universe.dev", "https://cloud.r-project.org"))'
+      - name: Cases, rustycogs
+        run: |
+          foreach ($c in 'load', 'https') {
+            ./scripts/run-case.ps1 "R rustycogs $c" Rscript r/rustycogs.R $c
+          }
+      # the crashing case under the debugger: where does the fail-fast come from?
+      - name: Under cdb
+        if: always()
+        run: |
+          ./scripts/debug-case.ps1 "R https" r/cases.R https
+          ./scripts/debug-case.ps1 "R load (control)" r/cases.R load
+          ./scripts/debug-case.ps1 "R rustycogs https" r/rustycogs.R https
       - name: Analyse dumps
         if: always()
         run: ./scripts/analyse-dumps.ps1

@@ -38,6 +38,7 @@ results table to its summary.
 | job | what | separates |
 |---|---|---|
 | R + tabularberg | the r-universe Windows binary; cases `load`, `local`, `https-open`, `https`, `https-drop-all` (every Rust object dropped and the runtime shut down before exit), `s3` | network vs local Icechunk; open vs read; held objects vs global state |
+| R + rustycogs (control) | another R package with the same Rust HTTP/TLS stack (object_store + reqwest 0.13 rustls/aws-lc, extendr, the same Makevars.win recipe), no icechunk: `load`, `https` (IFDs of a Copernicus DEM COG) | icechunk/tabularberg vs any R + Rust + this TLS stack |
 | Python + icechunk | the same repository and chunk through the icechunk wheel (MSVC) | icechunk/object_store upstream vs our build |
 | Rust exe, GNU and MSVC | one read with the same pinned crates, no R, no icechunk: `none`, `http` (local server, no TLS), `https`, `https-shutdown`, `object-store`; the GNU build is linked with Rtools' gcc, as R's Makevars.win does | toolchain; TLS vs plain HTTP; reqwest vs object_store |
 
