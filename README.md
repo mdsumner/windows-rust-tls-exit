@@ -26,6 +26,73 @@ One difference stands out: R packages on Windows are built with the GNU
 toolchain (Rtools, `x86_64-pc-windows-gnu`), while icechunk's Python wheels
 are built with MSVC.
 
+## Finding (runs 2 and 3, 2026-11-16)
+
+**It is aws-lc's exit-time zeroization, run from `DLL_PROCESS_DETACH`.**
+Not icechunk, tabularberg or extendr: rustycogs (same Rust TLS stack, no
+icechunk) crashes the same way.
+
+| case | exit |
+|---|---|
+| R + tabularberg: `load`, `local`, `https-open` (no chunk fetched) | 0 |
+| R + tabularberg: `https`, `s3`, `https-drop-all` (all objects dropped, runtime shut down) | `0xC0000409` |
+| R + rustycogs: `load` / `https` | 0 / `0xC0000409` |
+| Python + icechunk wheel (MSVC): `open`, `https`, `s3` | 0 |
+| Rust exe, same crates, GNU (Rtools) and MSVC: all modes | 0 |
+
+Under cdb (`Rterm.exe`, run 3), the fail-fast is `FAST_FAIL_FATAL_APP_EXIT`
+from `ucrtbase!abort`, with this stack (tabularberg; rustycogs is identical
+with aws-lc 0.44). Frames named from the disassembly of the r-universe
+binary (stripped; `.pdata` function bounds, import table, the string
+`" once %p is %d\n"`) against aws-lc-sys 0.47.0's source:
+
+```
+R_CleanUp -> exit() -> ExitProcess -> ntdll!LdrShutdownProcess
+  -> tabularberg.dll DllMain (DLL_PROCESS_DETACH, MinGW CRT)
+    -> ucrtbase!execute_onexit_table         the DLL's own atexit list
+      -> rand_thread_local_state_clear_all   __attribute__((destructor)), rand.c
+        -> tree_jitter_zeroize_thread_drbg   (via entropy_source->methods->zeroize_thread)
+          -> CRYPTO_once -> pthread_once (winpthreads)
+            -> tree_jitter_zeroize_global_drbg
+              -> tree_jitter_zeroize_drbg    tree_drbg_jitter_entropy.c
+                -> CRYPTO_sysrand_if_available -> CRYPTO_sysrand (rand_extra/windows.c)
+                  -> ProcessPrng fails -> abort()
+```
+
+aws-lc documents this exact hazard, and handles it for shared builds only
+(`tree_drbg_jitter_entropy.c`, above `tree_jitter_zeroize_drbg`):
+
+> Windows shared builds take the zeros option: there this runs from a
+> libcrypto global destructor on `DLL_PROCESS_DETACH`, after `ExitProcess`,
+> where `CRYPTO_sysrand` faults on bcryptprimitives.dll (loaded on demand,
+> so not kept alive by libcrypto's dependency graph). Static builds run it
+> from the executable's `atexit` and are unaffected.
+
+```c
+#if defined(OPENSSL_WINDOWS) && defined(BORINGSSL_SHARED_LIBRARY)
+  OPENSSL_memset(random_data, 0, CTR_DRBG_ENTROPY_LEN);
+#else
+  CRYPTO_sysrand_if_available(random_data, CTR_DRBG_ENTROPY_LEN);
+#endif
+```
+
+The gap: a **static** aws-lc linked **into a DLL** (an R package, any Rust
+cdylib) is not `BORINGSSL_SHARED_LIBRARY`, so it takes the sysrand path, but
+its destructors run on `DLL_PROCESS_DETACH` like a shared build's. That is
+every R package using rustls with its default aws-lc-rs provider on Windows.
+It needs random state to exist (a TLS handshake), hence network-only.
+
+The plain exe survives because its destructor runs from the exe's `atexit`
+inside `exit()`, before `ExitProcess`. Why the Python wheel (MSVC, also a
+DLL) survives is not established; its aws-lc may predate the tree-jitter
+DRBG.
+
+Candidate fixes: upstream, take the zeros option on Windows whenever the
+destructor may run during process shutdown (all Windows builds, or when
+`RtlDllShutdownInProgress()`), or not abort there; downstream, define
+`BORINGSSL_SHARED_LIBRARY` for aws-lc's C build (untested, affects exports),
+or carry that one-line patch.
+
 ## The experiments
 
 `.github/workflows/exit.yaml`, all on `windows-latest`. Each case is its own
