@@ -26,7 +26,7 @@ One difference stands out: R packages on Windows are built with the GNU
 toolchain (Rtools, `x86_64-pc-windows-gnu`), while icechunk's Python wheels
 are built with MSVC.
 
-## Finding (runs 2-5, 2026-11-16)
+## Finding (runs 2-6, 2026-11-16)
 
 **aws-lc's exit-time DRBG zeroization calls `BCryptGenRandom` from
 `DLL_PROCESS_DETACH`, inside `ExitProcess`. There it fails, and aws-lc
@@ -47,7 +47,21 @@ MSVC builds (the icechunk Python wheel) are fine, because they get
 **Fix for R packages:** build aws-lc's C at the Windows 10 level. In
 `Makevars.win`, before `cargo build`:
 `export AWS_LC_SYS_CFLAGS="-D_WIN32_WINNT=0x0A00"`. Rust's own Windows
-targets require Windows 10 anyway. tabularberg does this from `b3497ff`.
+targets require Windows 10 anyway. tabularberg does this from `b3497ff`,
+rustycogs (aws-lc-sys 0.44.0) from `2e4edd8`.
+
+### The fix in the r-universe binaries (run 6, `exit.yaml`)
+
+The r-universe Windows binaries built from tabularberg `b3497ff` and
+rustycogs `a9acc77` (R 4.6.2), with the same cases that crashed in runs 2-3:
+
+| case | read | exit |
+|---|---|---|
+| R + tabularberg: `load`, `local`, `https-open` | | 0 |
+| R + tabularberg: `https`, `https-drop-all` | 683,590 chunk bytes over HTTPS | 0 |
+| R + tabularberg: `s3` | 683,590 chunk bytes over S3 | 0 |
+| R + rustycogs: `load` | | 0 |
+| R + rustycogs: `https` | 4 IFDs over HTTPS | 0 |
 
 ### Minimal repro, no R (runs 4-5, [`minimal/`](minimal/))
 
